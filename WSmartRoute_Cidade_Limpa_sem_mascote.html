@@ -687,6 +687,9 @@ const MSG={
   showOpt:{icon:'👀',tone:'info',mood:'wow',
     plain:'A tracejado roxo está a melhor rota: {km}{pts}. Compara-a com a tua e toca num contentor para tentar outra vez.',
     mascot:'Olha a melhor rota, a tracejado roxo: {km}{pts}. Consegues igualá-la na próxima tentativa?'},
+  noSound:{icon:'🔇',tone:'warn',mood:'think',
+    plain:'Não se ouve o som? Aumenta o volume e, no iPhone, confirma que o botão lateral não está em silêncio. Depois toca outra vez no 🔊.',
+    mascot:'Não me ouves? Aumenta o volume e, no iPhone, tira o modo silêncio. Depois toca outra vez no 🔊!'},
   hideOpt:{icon:'🙈',tone:'info',mood:'think',
     plain:'Melhor rota escondida. Experimenta encontrá-la sozinho e depois compara.',
     mascot:'Escondi a melhor rota! Consegues encontrá-la sozinho?'},
@@ -1296,16 +1299,31 @@ function showFinal(){
 const SND={on:true, ctx:null, master:null, eng:null, nbuf:null};
 try{ SND.on = localStorage.getItem('cidadeLimpa.som')!=='0'; }catch(e){}
 const REDUCED = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+/* tiny silent WAV: playing it through an <audio> element moves iPhones to the "playback" audio session,
+   so the game is heard even when the ring/silent switch is on silent */
+function silentWav(){ const n=800, b=new Uint8Array(44+n), v=new DataView(b.buffer); const s=(o,x)=>{ for(let i=0;i<x.length;i++) b[o+i]=x.charCodeAt(i); };
+  s(0,'RIFF'); v.setUint32(4,36+n,true); s(8,'WAVE'); s(12,'fmt '); v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true);
+  v.setUint32(24,8000,true); v.setUint32(28,8000,true); v.setUint16(32,1,true); v.setUint16(34,8,true); s(36,'data'); v.setUint32(40,n,true); b.fill(128,44);
+  let bin=''; b.forEach(c=>bin+=String.fromCharCode(c)); return 'data:audio/wav;base64,'+btoa(bin); }
+let keepAlive=null;
 function unlockAudio(){
   if(!SND.on) return;
   try{
+    try{ if(navigator.audioSession) navigator.audioSession.type='playback'; }catch(e){}
+    if(!keepAlive){ keepAlive=new Audio(silentWav()); keepAlive.loop=true; keepAlive.setAttribute('playsinline',''); keepAlive.volume=0.01; }
+    const pr=keepAlive.play(); if(pr&&pr.catch) pr.catch(()=>{});
     if(!SND.ctx){ const AC=window.AudioContext||window.webkitAudioContext; if(!AC) return;
       SND.ctx=new AC(); SND.master=SND.ctx.createGain(); SND.master.gain.value=0.5; SND.master.connect(SND.ctx.destination); }
-    if(SND.ctx.state==='suspended') SND.ctx.resume();
+    if(SND.ctx.state!=='running'){ const r=SND.ctx.resume(); if(r&&r.then) r.then(()=>{ if(SND.on&&$('#intro').hidden&&!AMB.on) ambience(true); }).catch(()=>{}); }
+    const buf=SND.ctx.createBuffer(1,1,22050), src=SND.ctx.createBufferSource(); src.buffer=buf; src.connect(SND.ctx.destination); src.start(0);
   }catch(e){}
 }
-document.addEventListener('pointerdown',unlockAudio,{passive:true});
-document.addEventListener('keydown',unlockAudio);
+['pointerdown','touchend','click','keydown'].forEach(ev=>document.addEventListener(ev,unlockAudio,{passive:true,capture:true}));
+let sndWarned=false;
+function checkSound(){
+  if(!SND.on||sndWarned||!SND.ctx) return;
+  setTimeout(()=>{ if(SND.on && SND.ctx && SND.ctx.state!=='running' && !sndWarned){ sndWarned=true; coach('noSound'); } },900);
+}
 function ready(){ return SND.on && SND.ctx && SND.ctx.state==='running'; }
 function tone(f,d,o){ if(!ready()) return; o=o||{}; const c=SND.ctx, t=c.currentTime+(o.when||0);
   const osc=c.createOscillator(), g=c.createGain(); osc.type=o.type||'sine'; osc.frequency.setValueAtTime(f,t);
@@ -1354,6 +1372,7 @@ const SFX={
 const COACH_SFX={noRoom:'error',far:'error',noStops:'error',locked:'error',optLocked:'error',empty:'soft',l2Full:'horn',undo:'whoosh',reset:'whoosh',newCity:'jingle'};
 /* city ambience: distant traffic, birds and the odd far-away horn, very quiet */
 const AMB={on:false, nodes:null, timer:null};
+function startAmbience(tries){ tries=tries||0; if(!SND.on||AMB.on) return; if(ready()){ ambience(true); return; } if(tries<20) setTimeout(()=>startAmbience(tries+1),150); }
 function ambience(on){
   if(on===AMB.on) return;
   if(on && !ready()) return;
@@ -1390,7 +1409,8 @@ document.addEventListener('visibilitychange',()=>{ if(!SND.ctx) return; if(docum
 function setSound(on,user){
   SND.on=on; try{ localStorage.setItem('cidadeLimpa.som',on?'1':'0'); }catch(e){}
   const b=$('#sndBtn'); b.textContent= on?'🔊':'🔇'; b.setAttribute('aria-pressed',on?'true':'false'); b.setAttribute('aria-label', on? 'Som ligado. Carrega para desligar' : 'Som desligado. Carrega para ligar');
-  if(on&&user){ unlockAudio(); setTimeout(()=>{ SFX.tap(); if($('#intro').hidden) ambience(true); },60); } else if(!on){ engine(false); ambience(false); }
+  if(!on && keepAlive){ try{ keepAlive.pause(); }catch(e){} }
+  if(on&&user){ sndWarned=false; unlockAudio(); checkSound(); setTimeout(()=>{ SFX.tap(); if($('#intro').hidden) startAmbience(); },120); } else if(!on){ engine(false); ambience(false); }
   if(SND.master) SND.master.gain.value= on?0.5:0;
 }
 /* collection effect: ring + pieces of waste flying into the truck */
@@ -1589,7 +1609,7 @@ $('#finAgain').addEventListener('click',()=>{ $('#final').hidden=true; setLevel(
 $('#helpBtn').addEventListener('click',openIntro);
 $('#playBtn').addEventListener('click',()=>{
   if(!setTeam($('#teamInput').value)){ $('#teamField').classList.add('err'); $('#teamErr').textContent='Escrevam o nome da equipa ou dos participantes para entrar no ranking.'; $('#teamInput').focus(); return; }
-  closeModal('#intro'); coach(level===1?'start1':'start2'); unlockAudio(); setTimeout(()=>{ level===1? SFX.jingle() : SFX.sensor(); ambience(true); }, 60); });
+  closeModal('#intro'); coach(level===1?'start1':'start2'); unlockAudio(); checkSound(); setTimeout(()=>{ level===1? SFX.jingle() : SFX.sensor(); startAmbience(); }, 120); });
 $('#sndBtn').addEventListener('click',ev=>{ ev.stopPropagation(); setSound(!SND.on,true); });
 $('#teamInput').addEventListener('keydown',ev=>{ if(ev.key==='Enter'){ ev.preventDefault(); $('#playBtn').click(); } });
 $('#teamChip').addEventListener('click',()=>{ if(animating) return; openIntro(); setTimeout(()=>{ $('#teamInput').focus(); $('#teamInput').select(); },50); });
